@@ -1,0 +1,276 @@
+name: Release CI on PR
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+      # version branches:
+      - '*.x'
+      - 'release/v*'
+    types: [opened, synchronize, reopened, closed]
+
+jobs:
+  semantic-release-dry-run:
+    runs-on: hf-cicd-ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      config-file: custom.release.config.js
+      branch: ${{ github.event_name == 'pull_request' && github.base_ref || github.event.repository.default_branch }}
+    outputs:
+      new-release-published: ${{ steps.release-format.outputs.new-release-published }}
+      major-release: ${{ steps.major-release.outputs.major-release }}
+      next-version: ${{ steps.release-format.outputs.next-version }}
+      next-major: ${{ steps.major.outputs.next-major }}
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_KEY }}
+      - name: Set checkout path
+        shell: bash
+        run: echo "checkout-path=semantic-release-action-${{ github.sha }}" >> $GITHUB_ENV
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          path: ${{ env.checkout-path }}
+          ref: ${{ env.branch }}
+      - name: Switch to target branch
+        shell: bash
+        working-directory: ${{ env.checkout-path }}
+        run: |
+          git fetch --all
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git reset --hard ${{ github.event.pull_request.head.sha }}
+            git pull -X theirs origin ${{ github.head_ref }}
+          else
+            git reset --hard origin/${{ github.ref_name }}
+            git pull -X theirs origin ${{ github.ref_name }}
+          fi
+      - name: Determine config path
+        shell: bash
+        run: |
+          if [ -n "${{ env.config-file }}" ] && [ -f "${{ env.checkout-path }}/${{ env.config-file }}" ]; then
+            echo "config-path=${{ env.checkout-path }}/${{ env.config-file }}" >> $GITHUB_ENV
+          else
+            echo "config-path=${GITHUB_ACTION_PATH}/../default.release.config.js" >> $GITHUB_ENV
+          fi
+      - name: Copy config to default location
+        shell: bash
+        run: |
+          echo ${{ env.config-path }}
+          cp -f ${{ env.config-path }} ${{ env.checkout-path }}/release.config.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Copy package.json
+        shell: bash
+        ### run: cp -f ${GITHUB_ACTION_PATH}/../package.json ${{ env.checkout-path }}/package.json
+        run: |
+          ls -a ${{ env.checkout-path }}
+      - name: Install Semantic Release
+        shell: bash
+        working-directory: ${{ env.checkout-path }}
+        run: npm i
+      - name: Get version from Semantic Release Dry Run
+        id: release-format
+        shell: bash
+        working-directory: ${{ env.checkout-path }}
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: | 
+          export GITHUB_REF=refs/heads/${{ env.branch }}
+          export GITHUB_REF_NAME=${{ env.branch }}
+          
+          OUTPUT_FILE="semantic_release_output.txt"
+          npx semantic-release --dry-run --no-ci --extends ./custom.release.config.js | tee "$OUTPUT_FILE"
+          echo "SEMANTIC_OUTPUT<<EOF" >> "$GITHUB_OUTPUT"
+          cat "$OUTPUT_FILE" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo $SEMANTIC_OUTPUT
+          
+          VERSION=$(cat "$OUTPUT_FILE" | \
+          grep -i -o "next release version is [0-9]\+\.[0-9]\+\.[0-9]\+\(-[0-9a-zA-Z.-]\+\)*" | \
+          sed 's/.*is //' || \
+          true)
+          
+          if [ -z "$VERSION" ]; then
+            echo "No next version available. Retrieving the latest git tag, or defaulting to v0.1.0..."
+            NEW_RELEASE_PUBLISHED=$(echo "false")
+            VERSION=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$' | head -n 1 || echo "v0.1.0")
+            SUMMARY=$(echo "### :ballot_box_with_check: No New Release will be triggered. Current Release Version $VERSION")
+            echo "Retrieving the latest git tag $VERSION, or defaulting to v0.1.0..."
+          else
+            NEW_RELEASE_PUBLISHED=$(echo "true")
+            VERSION="v$VERSION"
+            SUMMARY=$(echo "### :white_check_mark: Next Release Version: $VERSION")
+            echo "Next Release Version: $VERSION"
+          fi
+          echo "new-release-published=$NEW_RELEASE_PUBLISHED" >> $GITHUB_OUTPUT
+          echo "next-version=$VERSION" >> $GITHUB_OUTPUT
+          echo $SUMMARY >> $GITHUB_STEP_SUMMARY
+      - name: Determine if a major release
+        # if: steps.release-format.outputs.new-release-published == 'true' && !contains(steps.release-format.outputs.next-version, '-')
+        id: major-release
+        working-directory: ${{ env.checkout-path }}
+        shell: bash
+        run: |
+          MAJOR_CURRENT=$(
+            git tag --sort=-version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | head -n 1 \
+            | sed -E 's/^v([0-9]+).*/\1/' \
+            || echo "0"
+          )
+          MAJOR_NEXT=$(echo "${{ steps.release-format.outputs.next-version }}" | cut -d. -f1 | tr -d 'v' || echo "0")
+          echo "Current Major Version: $MAJOR_CURRENT" >> $GITHUB_STEP_SUMMARY
+          echo "Next Major Version: $MAJOR_NEXT" >> $GITHUB_STEP_SUMMARY
+          if [ "$MAJOR_NEXT" -gt "$MAJOR_CURRENT" ]; then
+            MAJOR_RELEASE="true"
+          else
+            MAJOR_RELEASE="false"
+          fi
+          # set output var
+          echo "major-release=$MAJOR_RELEASE" >> $GITHUB_OUTPUT
+      - name: Get major version updated, excluding prereleases
+        if: steps.major-release.outputs.major-release == 'true'
+        id: major
+        working-directory: ${{ env.checkout-path }}
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
+        run: |
+          # Fetch the latest changes including tags
+          git fetch --tags
+          git pull origin ${GITHUB_REF#refs/heads/}
+          MAJOR_VERSION=$(echo "${{ steps.release-format.outputs.next-version }}" | grep -o "^v[0-9]*")
+          echo "next-major=$MAJOR_VERSION" >> $GITHUB_OUTPUT
+          echo "### Next Major Release Version: $MAJOR_VERSION" >> $GITHUB_STEP_SUMMARY
+
+  publish-python-package-ci:
+    if: github.event.action != 'closed'
+    needs: semantic-release-dry-run
+    runs-on: hf-cicd-ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    outputs:
+      publish-status: ${{ steps.publish.outputs.publish-status }}
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: get-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_KEY }}
+      - name: Setup JFrog CLI
+        id: setup-jfrog-cli
+        uses: jfrog/setup-jfrog-cli@v4
+        env:
+          JF_URL: https://artifactory.healthfirst.org/
+        with:
+          oidc-provider-name: github-prod
+      - name: Upload to Artifactory
+        uses: analytics-ds/publish-python-package-to-artifactory-action@v3
+        id: publish
+        with:
+          ci-only: "true"
+          package-repo-name: analytics-ds-devcontainer-pypi/${{ needs.semantic-release-dry-run.outputs.next-major }}
+          project-path: "./src/testpkg"
+          publish-user: ${{ steps.setup-jfrog-cli.outputs.oidc-user }}
+          publish-token: ${{ steps.setup-jfrog-cli.outputs.oidc-token }}
+          token: ${{ steps.get-token.outputs.token }}
+          version: ${{ needs.semantic-release-dry-run.outputs.next-version }}
+          python-version: "3.11" 
+  
+  pr-comment:
+    if: github.event.action != 'closed'
+    runs-on: hf-cicd-ubuntu-latest
+    needs: [semantic-release-dry-run, publish-python-package-ci]
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.PR_APP_ID }}
+          private-key: ${{ secrets.PR_APP_TOKEN }}
+      - name: Add Pull Request comment
+        uses: analytics-ds/pr-comment-action@v1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          comment: |
+            ### New Release: ${{ needs.semantic-release-dry-run.outputs.new-release-published }}
+            ### Major Release: ${{ needs.semantic-release-dry-run.outputs.major-release }}
+            ### Next Release Version: ${{ needs.semantic-release-dry-run.outputs.next-version }} 
+            ### Major Version: ${{ needs.semantic-release-dry-run.outputs.next-major || 'pre-release' }}
+
+            ### Python CI Status: ${{ needs.publish-python-package-ci.outputs.publish-status }}
+
+            > Note: This is an automated comment generated during the release process.
+
+  on-merge:
+    name: Create Release Branch on PR Merge
+    needs: semantic-release-dry-run
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true && needs.semantic-release-dry-run.outputs.major-release == 'true' && needs.semantic-release-dry-run.outputs.next-major != ''
+    runs-on: hf-cicd-ubuntu-latest
+    env:
+      branch: ${{ github.event.repository.default_branch }}
+      next_major: v4
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_KEY }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ github.base_ref }}
+      - name: Fetch tags
+        run: |
+          set -euo pipefail
+          git fetch --tags --force --prune
+          release_branch="release/${{ needs.semantic-release-dry-run.outputs.next_major }}"
+          git switch -C "$release_branch"
+          git push --set-upstream origin "$release_branch"
+          echo "Release branch $release_branch created" >> $GITHUB_STEP_SUMMARY
+
+  pr-comment-release-branch:
+    runs-on: hf-cicd-ubuntu-latest
+    needs: [on-merge]
+    permissions:
+      pull-requests: write
+    steps:
+	    # - name: Comment on PR
+	    #   uses: actions/github-script@v7
+	    #   with:
+	    #     github-token: ${{ inputs.token }}
+	    #     script: |
+	    #       const { owner, repo } = context.repo;
+	    #       await github.rest.issues.createComment({
+	    #         owner: owner,
+	    #         repo: repo,
+	    #         issue_number: context.payload.pull_request.number,
+	    #         body: `${{ inputs.comment }}`
+	    #       });
+          
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.PR_APP_ID }}
+          private-key: ${{ secrets.PR_APP_TOKEN }}
+      - name: Add Pull Request comment
+        uses: analytics-ds/pr-comment-action@v1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          comment: |
+            ### Release branch created: ${{ needs.semantic-release-dry-run.outputs.next-major }}
+
+            > Note: This is an automated comment generated during the release process.

@@ -1,0 +1,242 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - dev
+      - '[0-9]+.x'
+      - 'release/v*'
+
+jobs:
+  release:
+    runs-on: hf-cicd-ubuntu-latest
+    env:
+      config-file: custom.release.config.js
+    outputs:
+      next-major: ${{ steps.major.outputs.next-major }}
+      next-version: ${{ steps.release-format.outputs.next-version }}
+      new-release-published: ${{ steps.release-format.outputs.new-release-published }}
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_KEY }}
+      # - name: Run Semantic Release
+      #   id: run-release
+      #   uses: analytics-ds/semantic-release-action@test
+      #   with:
+      #     github-token: ${{ steps.app-token.outputs.token }}
+      #     config-file: "custom.release.config.js"
+      
+      # analytics-ds/semantic-release-action@test action START steps:
+      - name: Set checkout path
+        shell: bash
+        run: echo "checkout-path=semantic-release-action-${{ github.sha }}" >> $GITHUB_ENV
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          path: ${{ env.checkout-path }}
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Copy package.json
+        shell: bash
+        ### run: cp -f ${GITHUB_ACTION_PATH}/package.json ${{ env.checkout-path }}/package.json
+        run: |
+          ls -a ${{ env.checkout-path }}
+      - name: Install
+        shell: bash
+        working-directory: ${{ env.checkout-path }}
+        run: npm i
+      - name: Determine config path
+        shell: bash
+        run: |
+          if [ -n "${{ env.config-file }}" ] && [ -f "${{ env.checkout-path }}/${{ env.config-file }}" ]; then
+            echo "config-path=${{ env.checkout-path }}/${{ env.config-file }}" >> $GITHUB_ENV
+          else
+            echo "config-path=${GITHUB_ACTION_PATH}/default.release.config.js" >> $GITHUB_ENV
+          fi
+      - name: Copy config to default location
+        shell: bash
+        run: | 
+          echo ${{ env.config-path }}
+          cp -f ${{ env.config-path }} ${{ env.checkout-path }}/release.config.js
+      - name: Format Semantic Release Output
+        id: release-format
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        working-directory: ${{ env.checkout-path }}
+        run: |
+          OUTPUT_FILE="semantic_release_output.txt"
+          npx semantic-release --extends ./custom.release.config.js | tee "$OUTPUT_FILE"
+          echo "SEMANTIC_OUTPUT<<EOF" >> "$GITHUB_OUTPUT"
+          cat "$OUTPUT_FILE" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo $SEMANTIC_OUTPUT
+          
+          VERSION=$(cat "$OUTPUT_FILE" | \
+          grep -i -o "next release version is [0-9]\+\.[0-9]\+\.[0-9]\+\(-[0-9a-zA-Z.-]\+\)*" | \
+          sed 's/.*is //' || \
+          true)
+
+          if [ -z "$VERSION" ]; then
+            echo "No next version available. Retrieving the latest git tag, or defaulting to v0.1.0..."
+            NEW_RELEASE_PUBLISHED=$(echo "false")
+            VERSION=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$' | head -n 1 || echo "v0.1.0")
+            SUMMARY=$(echo "### :ballot_box_with_check: No New Release will be triggered. Current Release Version $VERSION")
+            echo "Retrieving the latest git tag $VERSION, or defaulting to v0.1.0..."
+          else
+            NEW_RELEASE_PUBLISHED=$(echo "true")
+            VERSION="v$VERSION"
+            SUMMARY=$(echo "### :white_check_mark: Next Release Version: $VERSION")
+            echo "Next Release Version: $VERSION"
+          fi
+
+          echo "new-release-published=$NEW_RELEASE_PUBLISHED" >> $GITHUB_OUTPUT
+          echo "next-version=$VERSION" >> $GITHUB_OUTPUT
+          echo $SUMMARY >> $GITHUB_STEP_SUMMARY
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }} 
+      - name: Push updates to branch for major version, excluding prereleases
+        if: steps.release-format.outputs.new-release-published == 'true' && !contains(steps.release-format.outputs.next-version, '-')
+        id: major
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
+        run: |
+          # Fetch the latest changes including tags
+          git fetch --tags
+          git pull origin ${GITHUB_REF#refs/heads/}
+          MAJOR_VERSION=$(echo "${{ steps.release-format.outputs.next-version }}" | grep -o "^v[0-9]*")
+          git tag -f "${MAJOR_VERSION}"
+          git push https://x-access-token:${{ steps.app-token.outputs.token }}@github.healthfirst.org/${GITHUB_REPOSITORY}.git "${MAJOR_VERSION}" -f
+          echo "next-major=$MAJOR_VERSION" >> $GITHUB_OUTPUT
+          echo "### Major Release Version: $MAJOR_VERSION" >> $GITHUB_STEP_SUMMARY
+      # semantic-release action END
+      
+      # - name: Checkout (full history)
+      # - uses: actions/checkout@v4
+      #   with:
+      #     fetch-depth: 0
+      #     token: ${{ steps.app-token.outputs.token }}
+      # - name: Create release branch for previous major
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+
+      #     NEW_VERSION="${{ steps.release-format.outputs.next-version }}"
+      #     echo "New version: ${NEW_VERSION}"
+
+      #     # Extract numeric major (e.g., v2.1.2 -> 2)
+      #     NEW_MAJOR=$(echo "${NEW_VERSION}" | sed -E 's/^v([0-9]+).*/\1/')
+      #     if [[ -z "${NEW_MAJOR}" ]]; then
+      #       echo "Could not parse major from ${NEW_VERSION}; skipping."
+      #       exit 0
+      #     fi
+
+      #     # Previous major (if none, nothing to do)
+      #     if [[ "${NEW_MAJOR}" -le 1 ]]; then
+      #       echo "No previous major exists (major=${NEW_MAJOR}); skipping."
+      #       exit 0
+      #     fi
+      #     PREV_MAJOR=$((NEW_MAJOR - 1))
+      #     PREV_PREFIX="v${PREV_MAJOR}"
+
+      #     # Ensure we have all tags and heads
+      #     git fetch --prune --tags origin
+      #     git fetch --prune origin "+refs/heads/*:refs/remotes/origin/*"
+
+      #     # Find the latest tag in the previous major series (e.g., v1.*)
+      #     LATEST_PREV_TAG=$(git tag -l "${PREV_PREFIX}.*" | sort -V | tail -n1 || true)
+      #     if [[ -z "${LATEST_PREV_TAG}" ]]; then
+      #       echo "No tags found for ${PREV_PREFIX}.*; nothing to branch from. Skipping."
+      #       exit 0
+      #     fi
+      #     echo "Latest ${PREV_PREFIX} tag: ${LATEST_PREV_TAG}"
+
+      #     RELEASE_BRANCH="release/${PREV_PREFIX}"
+
+      #     # Skip if branch already exists on origin
+      #     if git ls-remote --exit-code --heads origin "${RELEASE_BRANCH}" >/dev/null 2>&1; then
+      #       echo "Branch ${RELEASE_BRANCH} already exists on origin; skipping."
+      #       exit 0
+      #     fi
+
+      #     # Create the branch from the latest tag of the previous major and push
+      #     git branch "${RELEASE_BRANCH}" "${LATEST_PREV_TAG}"
+      #     git push origin "${RELEASE_BRANCH}"
+
+      #     {
+      #       echo "next-prev-major=${PREV_PREFIX}"
+      #       echo "latest-prev-tag=${LATEST_PREV_TAG}"
+      #     } >> "$GITHUB_OUTPUT"
+
+      # - name: Summarize
+      #   if: always()
+      #   run: |
+      #     echo "### Created release branch" >> "$GITHUB_STEP_SUMMARY"
+      #     echo "- Branch: \`release/v$((NEW_MAJOR - 1))\`" >> "$GITHUB_STEP_SUMMARY"
+      #     echo "- From tag: \`${LATEST_PREV_TAG:-n/a}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  publish-python-package:
+    needs: release
+    runs-on: hf-cicd-ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    outputs:
+      publish-status: ${{ steps.publish.outputs.publish-status }}
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: get-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_KEY }}
+      - name: Setup JFrog CLI
+        id: setup-jfrog-cli
+        uses: jfrog/setup-jfrog-cli@v4
+        env:
+          JF_URL: https://artifactory.healthfirst.org/
+        with:
+          oidc-provider-name: github-prod
+      - name: Upload to Artifactory
+        uses: analytics-ds/publish-python-package-to-artifactory-action@v3
+        id: publish
+        with:
+          ci-only: "false"
+          package-repo-name: analytics-ds-devcontainer-pypi/${{ needs.release.outputs.next-major }}
+          project-path: "./src/testpkg"
+          publish-user: ${{ steps.setup-jfrog-cli.outputs.oidc-user }}
+          publish-token: ${{ steps.setup-jfrog-cli.outputs.oidc-token }}
+          token: ${{ steps.get-token.outputs.token }}
+          version: ${{ needs.release.outputs.next-version }}
+          python-version: "3.11"
+
+  workflow-summary:
+    runs-on: hf-cicd-ubuntu-latest
+    needs: [release, publish-python-package]
+    steps:
+      - name: Add Workflow Summary comment
+        if: always()
+        run: |
+          echo "### Created release branch" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Branch: \`release/v$((NEW_MAJOR - 1))\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- From tag: \`${LATEST_PREV_TAG:-n/a}\`" >> "$GITHUB_STEP_SUMMARY"
+          
+          echo "### Next Release Version: ${{ needs.get-release-version.outputs.next-version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### New Release: ${{ needs.get-release-version.outputs.new-release-published }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Major Version: ${{ needs.get-release-version.outputs.next-major || 'pre-release' }}" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Python CI Status: ${{ needs.publish-python-package-ci.outputs.publish-status }}" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "> Note: This is summary annotation generated during the release process." >> "$GITHUB_STEP_SUMMARY"

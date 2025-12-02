@@ -35,34 +35,55 @@ Using **Semantic Versioning** (semver) with the following format:
 ## CI/CD Pipeline Overview
 
 ```mermaid
-flowchart TD
-    A[Feature/Fix Branch] -->|Push| B[Code CI Pipeline]
-    A -->|Create PR| C[PR to dev]
-    C -->|Preliminary Checks| D{PR Approved?}
-    D -->|No| E[Fix Issues]
+---
+config:
+  look: neo
+---
+flowchart TB
+    A["Feat/Fix branch"] -- Create PR --> C["PR to dev"]
+    C -- Preliminary Checks --> D{"PR Approved?"}
+    D -- No --> E["Fix Issues"]
     E --> A
-    D -->|Yes| F[Merge to dev]
-    F -->|Push to dev| G[Dev Release Pipeline]
-    G --> H[Deploy to DEV]
-    H --> I{Ready for Prod?}
-    I -->|Yes| J[Create PR: dev → main]
-    J -->|PR Checks| K{PR Approved?}
-    K -->|No| L[Fix Issues]
-    L --> F
-    K -->|Yes| M[Merge to main]
-    M -->|Push to main| N[Prod Deployment Pipeline]
-    N --> O[Deploy to PROD]
-    M --> P[Create release/v* Snapshot]
-    P -->|Hotfix needed| Q[Push to release/v*]
-    Q --> R[Hotfix Pipeline]
-    R --> S[Deploy Hotfix to DEV]
-    
-    style A fill:#e1f5ff
+    D -- Yes --> F["Merge to dev"]
+    H["Deploy to DEV"] -- Push to dev --> G["Dev Release Pipeline"]
+    H --> I{"Ready for Prod?"}
+    I -- Yes --> J["Create PR: dev → main"]
+    J -- PR Checks --> K{"PR Approved?"}
+    K -- No --> E
+    K -- Yes --> M["Merge to main"]
+    M -- Push to main --> N["Prod Deployment Pipeline"]
+    N --> O["Deploy to PROD"]
+    M --> P["Create release/v* Snapshot"]
+    P -- Hotfix needed --> Q["Push to release/v*"]
+    Q --> R["Hotfix Pipeline"]
+    R --> S["Deploy Hotfix to DEV"]
+    F --> n1["Develop"] & n2["Dev Release Pipeline"]
+    n1 --> H
+    A --> A1["CI Pipeline"]
+    n2 -- Changelog update --> n1
+    n2 --> n3["Untitled Node"]
+
+    A@{ shape: cyl}
+    G@{ shape: h-cyl}
+    n1@{ shape: cyl}
+    n2@{ shape: h-cyl}
+    A1@{ shape: h-cyl}
+    n3@{ shape: hex}
+     A:::Ash
+     G:::Ash
+     n1:::Ash
+     n2:::Ash
+     A1:::Ash
+     n3:::Ash
+    classDef Ash stroke-width:1px, stroke-dasharray:none, stroke:#999999, fill:#EEEEEE, color:#000000
+    style A fill:#BBDEFB
     style F fill:#fff4e6
-    style M fill:#e8f5e9
     style H fill:#fff3cd
+    style M fill:#e8f5e9
     style O fill:#d4edda
     style P fill:#f8d7da
+    style n1 fill:#BBDEFB
+    style n3 fill:#757575
 ```
 
 ## Detailed Pipeline Stages

@@ -41,7 +41,7 @@ This document describes the automated CI/CD pipeline for the project, visualized
 feat/fix → dev → main
                   ↓
               release/vX (on major releases)
-                  ↓
+                ↑ ↓
               hotfix → dev → main
 ```
 
@@ -133,7 +133,7 @@ flowchart LR
     A[Merge to dev] --> B[Dev Release Pipeline]
     B --> C[Create pre-release<br>x.x.x-dev.N]
     C --> D[Deploy to DEV]
-    D --> E[Update CHANGELOG<br>[ci skip]]
+    D --> E[Update CHANGELOG<br>'ci skip']
 ```
 
 ---
@@ -198,7 +198,7 @@ flowchart LR
     A[Merge to main] --> B[Dev Release Pipeline]
     B --> C[Create release<br>x.x.x]
     C --> D[Deploy to PROD]
-    D --> E[Update CHANGELOG<br>[ci skip]]
+    D --> E[Update CHANGELOG<br>'ci skip']
 ```
 
 ---
